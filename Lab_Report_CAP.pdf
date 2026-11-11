@@ -1,0 +1,43 @@
+#	Test Case	Scenario	Expected	Actual
+1	CP Write to Majority	Partition {A,B}/{C}, write to B	success, acks=2	Passed
+2	CP Write to Minority	Write to C	failure, ReplicaUnavailableError, acks=1	Passed
+3	AP Write to Minority	Write to C	success, acks=1	Passed
+4a	LWW Merge (DC-2 timestamp is greater)	Sync after partition recovery	All nodes converge to the value from DC-2	Passed
+4b	LWW Merge (DC-1 timestamp is greater)	Same as above	Converge to the value from DC-1	Passed
+5	Linearizable Read Proxied to Leaseholder	Value exists only on A	Linearizable read via B succeeds; local stale read fails	Passed
+6	Staleness Threshold Exceeded	Read from C after 0.4s of isolation (threshold: 100ms)	STALE_READ_EXCEEDED	Passed
+7	Availability During Isolation	C disconnected from A	Linearizable read: UNAVAILABLE; stale read: successful	Passed
+8	Idempotency Key Deduplication	Write the same key twice	Second write ignored; value remains v1	Passed
+9	Mathematical Verification of R+W>N (N=3)	Enumerate all R and W values	Read and write sets intersect if and only if R+W>N	Passed
+
+Summary: 10 test cases, 10 passed, duration: 1.72 seconds.
+
+Section 2: PACELC Performance Table
+
+Configuration: 1000 iterations; client connected to follower B; simulated 5 ms round-trip latency between follower and Leaseholder. Read Mode Target Node Median (ms) p95 (ms) Read Availability (%)
+Linearizable Leaseholder (Remote) 8.538 10.507 100.0
+Follower Stale Local Follower 1.099 1.729 100.0
+Linearizable(Leaseholder downtime, 200 times) Leaseholder (Remote) 8.180 11.679 0.0
+Follower Stale(Leaseholder downtime, 200 times) Local Follower 1.112 1.747	100.0
+
+
+
+
+Analysis Points:
+
+The median latency for linearizable reads is approximately 7.8 times that of local reads. The additional ~7.4 ms of latency stems from a 5 ms simulated delay combined with the overhead of an extra gRPC proxy hop.
+This latency gap illustrates the "Else: Latency vs. Consistency" trade-off within the PACELC framework: under normal operating conditions, strong consistency comes at the cost of increased latency.
+In the event of a leaseholder failure, the availability of linearizable reads drops to 0%, whereas local stale reads remain 100% available; this reflects the "Partition: Availability vs. Consistency" trade-off.
+The latency figures for linearizable reads in the final two rows of the table represent the duration of "failed requests" rather than successful reads; this should be explicitly noted in the report.
+The 5 ms figure is a simulated value; please state this clearly in the report.
+Section 3: Conceptual Questions
+
+1. Why does $R+W > N$ guarantee linearizability, while $R+W \le N$ allows for the retrieval of stale values?
+When $R+W > N$, any read set of size $R$ and any write set of size $W$ must share at least one replica (by the Pigeonhole Principle). Consequently, a read operation is guaranteed to encounter at least one replica that holds the latest acknowledged write; by selecting the version with the most recent timestamp, the system can retrieve the latest value. Conversely, when $R+W \le N$, the two sets may be entirely disjoint—for example, with $N=3$, $R=1$, and $W=1$, a write might occur on replica A while a read occurs on replica C. In this case, the read operation accesses a replica that has not yet received the write, resulting in the return of a stale value. Test 9, conducted with $N=3$, evaluates all possible combinations of $R$ and $W$, confirming that "read and write sets must intersect if and only if $R+W > N$."
+
+2. How do `QUORUM_CP` and `ALWAYS_AP` differ in their approach to writes occurring within a minority partition?
+
+`QUORUM_CP` rejects writes when in a minority partition (i.e., only 1/3 of the nodes are present, resulting in `acks=1 < 2`). It sacrifices availability to ensure consistency, preventing the system from diverging into separate, inconsistent states where different writes occur on different sides of the partition.
+`ALWAYS_AP` accepts writes even when in a minority partition (i.e., `acks=1`). It preserves availability, but at the cost of data divergence: during a partition, DC-1 and DC-2 may hold different values ​​for the same key. Once the partition is resolved, the system reconciles these values ​​using a "Last-Write-Wins" strategy (where the write with the later timestamp prevails), achieving eventual consistency—though the write with the earlier timestamp is effectively discarded.
+
+This is the essence of the CAP theorem: in the event of a network partition (P), one must choose between consistency (C) and availability (A).
